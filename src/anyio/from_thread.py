@@ -31,7 +31,9 @@ from typing import (
     overload,
 )
 
+from . import thread_policies
 from ._core._eventloop import (
+    get_async_backend,
     get_cancelled_exc_class,
     threadlocals,
 )
@@ -86,6 +88,7 @@ def run(
         Added the ``token`` parameter.
 
     """
+    thread_policies.enforce_token_gate(token)
     explicit_token = token is not None
     token = _token_or_error(token)
     return token.backend_class.run_async_from_thread(
@@ -114,6 +117,7 @@ def run_sync(
         Added the ``token`` parameter.
 
     """
+    thread_policies.enforce_token_gate(token)
     explicit_token = token is not None
     token = _token_or_error(token)
     return token.backend_class.run_sync_from_thread(
@@ -194,6 +198,7 @@ class BlockingPortal:
 
     def __init__(self) -> None:
         self._token = current_token()
+        self._root_task = get_async_backend().current_root_task()
         self._event_loop_thread_id: int | None = get_ident()
         self._stop_event = Event()
         self._task_group = create_task_group()
@@ -260,6 +265,17 @@ class BlockingPortal:
         try:
             retval_or_awaitable = func(*args, **kwargs)
             if isawaitable(retval_or_awaitable):
+                if not thread_policies._portal_allows_awaitable(self._root_task):
+                    close = getattr(retval_or_awaitable, "close", None)
+                    if callable(close):
+                        close()
+
+                    raise thread_policies.ThreadBridgePolicyError(
+                        "The current thread bridge policy frame (portal_admit=sync_"
+                        "callable_only) does not allow awaiting the callable's result "
+                        "in this blocking portal"
+                    )
+
                 with CancelScope() as scope:
                     future.add_done_callback(callback)
                     retval = await retval_or_awaitable
@@ -309,6 +325,31 @@ class BlockingPortal:
             future,
             token=self._token,
         )
+
+    def _check_portal_admission(self, func: Callable[[Unpack[PosArgsT]], Any]) -> None:
+        """
+        Resolve the portal task tree's ``portal_admit`` frame in the event loop thread
+        and reject the entry before anything is spawned if the frame says so.
+
+        """
+        admission = run_sync(
+            thread_policies.resolve_portal_admission,
+            self._root_task,
+            func,
+            token=self._token,
+        )
+        if admission == "reject_new":
+            raise thread_policies.ThreadBridgePolicyError(
+                "The current thread bridge policy frame (portal_admit=reject_new) "
+                "rejects new tasks in this blocking portal"
+            )
+
+        if admission == "sync_callable_only":
+            raise thread_policies.ThreadBridgePolicyError(
+                "The current thread bridge policy frame (portal_admit=sync_callable_"
+                "only) only admits plain synchronous callables in this blocking "
+                "portal"
+            )
 
     @overload
     def call(
@@ -380,6 +421,7 @@ class BlockingPortal:
 
         """
         self._check_running()
+        self._check_portal_admission(func)
         f: Future[T_Retval] = Future()
         self._spawn_task_from_thread(func, args, {}, name, f)
         return f
@@ -420,6 +462,7 @@ class BlockingPortal:
                     task_status_future.set_exception(exc)
 
         self._check_running()
+        self._check_portal_admission(func)
         task_status_future: Future = Future()
         task_status = _BlockingPortalTaskStatus(task_status_future)
         f: Future = Future()
@@ -585,4 +628,10 @@ def check_cancelled() -> None:
             "This function can only be called inside an AnyIO worker thread"
         ) from None
 
+    # Bind to the frame captured when this worker thread was dispatched.  The
+    # token_gate dimension does not gate cancellation visibility (check_cancelled
+    # takes no token); a force_wait frame in particular must still surface the host
+    # cancellation here, and force_abandon must not silently disable this check
+    # either.
+    thread_policies.current_worker_token_gate()
     token.backend_class.check_cancelled()

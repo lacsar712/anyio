@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, TypeVar
 from warnings import warn
 
+from . import thread_policies
 from ._core._eventloop import get_async_backend
 
 if TYPE_CHECKING:
@@ -62,8 +63,17 @@ async def run_sync(
             stacklevel=2,
         )
 
+    # Resolve the cancel handoff and the limiter binding as two independent
+    # dimensions of the current task tree's thread bridge policy stack.
+    abandon_on_cancel = thread_policies.resolve_cancel_handoff(abandon_on_cancel)
+    limiter, bypass_limiter = thread_policies.resolve_worker_limiter(limiter)
+
     return await get_async_backend().run_sync_in_worker_thread(
-        func, args, abandon_on_cancel=abandon_on_cancel, limiter=limiter
+        func,
+        args,
+        abandon_on_cancel=abandon_on_cancel,
+        limiter=limiter,
+        bypass_limiter=bypass_limiter,
     )
 
 

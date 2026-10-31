@@ -77,6 +77,27 @@ Running asynchronous code from other threads
 .. autoclass:: anyio.from_thread.BlockingPortal
 .. autoclass:: anyio.from_thread.BlockingPortalProvider
 
+Thread bridge and portal policies
+---------------------------------
+
+.. automodule:: anyio.thread_policies
+    :noindex:
+
+.. autofunction:: anyio.thread_policies.thread_bridge_policy
+.. autofunction:: anyio.thread_policies.current_thread_bridge_policy
+.. autofunction:: anyio.thread_policies.current_root_thread_bridge_policy
+.. autofunction:: anyio.thread_policies.current_worker_thread_bridge_policy
+.. autofunction:: anyio.thread_policies.resolve_cancel_handoff
+.. autofunction:: anyio.thread_policies.resolve_worker_limiter
+.. autofunction:: anyio.thread_policies.enforce_token_gate
+.. autofunction:: anyio.thread_policies.resolve_portal_admission
+.. autoclass:: anyio.thread_policies.ThreadBridgePolicy
+.. autoclass:: anyio.thread_policies.CancelHandoff
+.. autoclass:: anyio.thread_policies.LimiterBind
+.. autoclass:: anyio.thread_policies.PortalAdmit
+.. autoclass:: anyio.thread_policies.TokenGate
+.. autoclass:: anyio.thread_policies.ThreadBridgePolicyError
+
 Async file I/O
 --------------
 

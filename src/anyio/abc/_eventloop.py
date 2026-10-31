@@ -92,6 +92,20 @@ class AsyncBackend(metaclass=ABCMeta):
 
     @classmethod
     @abstractmethod
+    def current_root_task(cls) -> object:
+        """
+        Return an identity-stable object identifying the AnyIO task tree that the
+        current task belongs to.
+
+        Unlike :meth:`current_token`, the returned object distinguishes between
+        multiple task trees running in the same native event loop.
+
+        :return: a backend-specific root task object
+
+        """
+
+    @classmethod
+    @abstractmethod
     def current_time(cls) -> float:
         """
         Return the current value of the event loop's internal clock.
@@ -207,6 +221,8 @@ class AsyncBackend(metaclass=ABCMeta):
         args: tuple[Unpack[PosArgsT]],
         abandon_on_cancel: bool = False,
         limiter: CapacityLimiter | None = None,
+        *,
+        bypass_limiter: bool = False,
     ) -> T_Retval:
         pass
 

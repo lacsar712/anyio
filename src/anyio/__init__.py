@@ -137,6 +137,9 @@ if TYPE_CHECKING or not install_lazy_importer():
         lowlevel as lowlevel,
     )
     from . import (
+        thread_policies as thread_policies,
+    )
+    from . import (
         to_interpreter as to_interpreter,
     )
     from . import (

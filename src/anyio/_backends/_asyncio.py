@@ -31,7 +31,12 @@ from collections.abc import (
     Sequence,
 )
 from concurrent.futures import Future
-from contextlib import AbstractContextManager, suppress
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    nullcontext,
+    suppress,
+)
 from contextvars import Context, copy_context
 from dataclasses import dataclass, field
 from functools import partial, wraps
@@ -64,6 +69,7 @@ from .. import (
     LockStatistics,
     TaskInfo,
     abc,
+    thread_policies,
 )
 from .._core._eventloop import (
     claim_worker_thread,
@@ -1084,7 +1090,15 @@ class WorkerThread(Thread):
         self.idle_workers = idle_workers
         self.loop = root_task._loop
         self.queue: Queue[
-            tuple[Context, Callable, tuple, asyncio.Future, CancelScope] | None
+            tuple[
+                Context,
+                Callable,
+                tuple,
+                asyncio.Future,
+                CancelScope,
+                thread_policies.ThreadBridgePolicy,
+            ]
+            | None
         ] = Queue(2)
         self.idle_since = AsyncIOBackend.current_time()
         self.stopping = False
@@ -1115,17 +1129,19 @@ class WorkerThread(Thread):
                     # Shutdown command received
                     return
 
-                context, func, args, future, cancel_scope = item
+                context, func, args, future, cancel_scope, policy_frame = item
                 result = None
                 exception: BaseException | None = None
                 if not future.cancelled():
                     threadlocals.current_cancel_scope = cancel_scope
+                    thread_policies._bind_worker_frame(policy_frame)
                     try:
                         result = context.run(func, *args)
                     except BaseException as exc:
                         exception = exc
                     finally:
                         del threadlocals.current_cancel_scope
+                        thread_policies._unbind_worker_frame()
 
                 # Report the result even if the future was cancelled before the call
                 # was started, so that the worker is put back on the idle list
@@ -1139,7 +1155,15 @@ class WorkerThread(Thread):
 
                 del result, exception
                 self.queue.task_done()
-                del item, context, func, args, future, cancel_scope
+                del (
+                    item,
+                    context,
+                    func,
+                    args,
+                    future,
+                    cancel_scope,
+                    policy_frame,
+                )
 
     def stop(self, f: asyncio.Task | None = None) -> None:
         self.stopping = True
@@ -2625,6 +2649,10 @@ class AsyncIOBackend(AsyncBackend):
         return get_running_loop()
 
     @classmethod
+    def current_root_task(cls) -> object:
+        return find_root_task()
+
+    @classmethod
     def current_time(cls) -> float:
         return get_running_loop().time()
 
@@ -2726,8 +2754,14 @@ class AsyncIOBackend(AsyncBackend):
         args: tuple[Unpack[PosArgsT]],
         abandon_on_cancel: bool = False,
         limiter: BaseCapacityLimiter | None = None,
+        *,
+        bypass_limiter: bool = False,
     ) -> T_Retval:
         await cls.checkpoint()
+
+        # Snapshot the dispatch-time frame here; pushes made after the worker starts
+        # executing are void for this dispatch by design.
+        policy_frame = thread_policies.current_thread_bridge_policy()
 
         # If this is the first run in this event loop thread, set up the necessary
         # variables
@@ -2740,7 +2774,12 @@ class AsyncIOBackend(AsyncBackend):
             _threadpool_idle_workers.set(idle_workers)
             _threadpool_workers.set(workers)
 
-        async with limiter or cls.current_default_thread_limiter():
+        if bypass_limiter:
+            limiter_cm: AbstractAsyncContextManager[object] = nullcontext()
+        else:
+            limiter_cm = limiter or cls.current_default_thread_limiter()
+
+        async with limiter_cm:
             with CancelScope(shield=not abandon_on_cancel) as scope:
                 future = asyncio.Future[T_Retval]()
                 root_task = find_root_task()
@@ -2775,7 +2814,9 @@ class AsyncIOBackend(AsyncBackend):
                 else:
                     worker_scope = scope._parent_scope
 
-                worker.queue.put_nowait((context, func, args, future, worker_scope))
+                worker.queue.put_nowait(
+                    (context, func, args, future, worker_scope, policy_frame)
+                )
                 return await future
 
     @classmethod

@@ -138,6 +138,47 @@ at the same time, the same blocking portal will be used to handle the async call
 inside. It's easy to see that this is much more efficient than having each call spawn
 its own blocking portal.
 
+Overriding thread bridge and portal policies for a task tree
+------------------------------------------------------------
+
+Sometimes a component needs to change how the thread bridges behave for every call
+made within a block of code, regardless of the keyword arguments passed by individual
+callers – for example to force every :func:`~to_thread.run_sync` call to abandon its
+worker thread on cancellation, to stop worker dispatches from consuming capacity
+limiter tokens, to make a :class:`~from_thread.BlockingPortal` stop accepting new
+tasks from external threads, or to require an explicit event loop token in worker
+threads.
+
+To that end, AnyIO provides a task-tree scoped stack of policy frames,
+:func:`~anyio.thread_policies.thread_bridge_policy`:
+
+.. literalinclude:: snippets/threads/thread_bridge_policy.py
+
+Each frame can override four independent dimensions:
+
+* ``cancel_handoff``: ``pin`` (follow the caller's ``abandon_on_cancel``),
+  ``force_abandon`` (always abandon the worker thread result on host cancellation) or
+  ``force_wait`` (always wait for the worker thread; the worker can still observe the
+  host cancellation via :func:`~from_thread.check_cancelled`)
+* ``limiter_bind``: ``pin`` (use the caller's limiter or the default limiter),
+  ``force_default`` (always use the default limiter, ignoring a caller supplied
+  limiter) or ``bypass_acquire`` (dispatch without acquiring any limiter token)
+* ``portal_admit``: ``pin`` (keep accepting portal calls), ``reject_new`` (reject
+  every new ``call``/``start_task_soon``/``start_task``/wrapped async context manager
+  entry) or ``sync_callable_only`` (only admit plain synchronous callables)
+* ``token_gate``: ``pin`` (use the implicit worker thread token when available),
+  ``require_explicit`` (always require an explicit token, even in a worker thread) or
+  ``forbid_foreign_token`` (reject tokens that do not belong to the current backend
+  event loop)
+
+Frames can be nested; a dimension inherits the outermost non-``pin`` override, and
+popping a frame restores the previous state (also when the block exits via an
+exception).  The stack is attached to the current AnyIO task tree rather than to the
+native event loop, so two task trees sharing one loop – and two concurrent tasks
+within a tree – do not share frames.  The effective frame is captured at dispatch
+time, so pushing a frame after a worker thread has started running (or after a portal
+task was spawned) never retroactively changes an operation already in flight.
+
 Context propagation
 -------------------
 

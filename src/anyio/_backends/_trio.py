@@ -60,6 +60,7 @@ from .. import (
     TaskInfo,
     WouldBlock,
     abc,
+    thread_policies,
 )
 from .._core._eventloop import claim_worker_thread
 from .._core._exceptions import (
@@ -924,6 +925,19 @@ class CapacityLimiter(BaseCapacityLimiter):
 
 _capacity_limiter_wrapper: trio.lowlevel.RunVar = RunVar("_capacity_limiter_wrapper")
 
+#: An unlimited capacity limiter shared by dispatches that bypass limiter
+#: acquisition.  It is never reconfigured (no total_tokens mutation), so bypassing
+#: dispatches can never contend for a token.
+_bypass_capacity_limiter: trio.CapacityLimiter | None = None
+
+
+def _get_bypass_capacity_limiter() -> trio.CapacityLimiter:
+    global _bypass_capacity_limiter
+    if _bypass_capacity_limiter is None:
+        _bypass_capacity_limiter = trio.CapacityLimiter(math.inf)
+
+    return _bypass_capacity_limiter
+
 
 #
 # Signal handling
@@ -1092,6 +1106,10 @@ class TrioBackend(AsyncBackend):
         return trio.lowlevel.current_trio_token()
 
     @classmethod
+    def current_root_task(cls) -> object:
+        return current_root_task()
+
+    @classmethod
     def current_time(cls) -> float:
         return trio.current_time()
 
@@ -1158,16 +1176,32 @@ class TrioBackend(AsyncBackend):
         args: tuple[Unpack[PosArgsT]],
         abandon_on_cancel: bool = False,
         limiter: BaseCapacityLimiter | None = None,
+        *,
+        bypass_limiter: bool = False,
     ) -> T_Retval:
+        # Snapshot the dispatch-time frame here; pushes made after the worker starts
+        # executing are void for this dispatch by design.
+        policy_frame = thread_policies.current_thread_bridge_policy()
+
         def wrapper() -> T_Retval:
             with claim_worker_thread(TrioBackend, token):
-                return func(*args)
+                thread_policies._bind_worker_frame(policy_frame)
+                try:
+                    return func(*args)
+                finally:
+                    thread_policies._unbind_worker_frame()
 
         token = TrioBackend.current_token()
+        trio_limiter: trio.CapacityLimiter | None
+        if bypass_limiter:
+            trio_limiter = _get_bypass_capacity_limiter()
+        else:
+            trio_limiter = cast("trio.CapacityLimiter | None", limiter)
+
         return await run_sync(
             wrapper,
             abandon_on_cancel=abandon_on_cancel,
-            limiter=cast(trio.CapacityLimiter, limiter),
+            limiter=trio_limiter,
         )
 
     @classmethod
